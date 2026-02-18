@@ -1,6 +1,9 @@
 from robosuite.environments.base import make
 
 # Manipulation environments
+from robosuite.environments.manipulation.movetask import MoveTask
+from robosuite.environments.manipulation.lift_target import LiftTarget
+
 from robosuite.environments.manipulation.lift import Lift
 from robosuite.environments.manipulation.stack import Stack
 from robosuite.environments.manipulation.nut_assembly import NutAssembly
