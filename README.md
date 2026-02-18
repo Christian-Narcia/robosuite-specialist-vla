@@ -46,7 +46,7 @@ conda activate robosuite-collection
 ```
 
 
-### 2. Install Python Dependencies
+### 2. Install Robosuite Python Dependencies
 
 Change directory to robosuite and install requirements:
 
