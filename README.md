@@ -32,7 +32,6 @@ Refer to the script for more usage examples and options.
 
 ### 1. Create Conda Environment
 
-
 Create a new Conda environment with Python 3.12 (add `-y` to auto-confirm prompts):
 
 ```sh
@@ -45,13 +44,25 @@ Activate the environment:
 conda activate robosuite-collection
 ```
 
+Install Git:
+
+```sh
+conda install git
+```
+
+Clone the repository:
+
+```sh
+git clone https://github.com/Christian-Narcia/robosuite-data-collection.git
+```
+
 
 ### 2. Install Robosuite Python Dependencies
 
 Change directory to robosuite and install requirements:
 
 ```sh
-cd robosuite
+cd robosuite-data-collection/robosuite
 pip install -r requirements.txt
 ```
 
@@ -64,6 +75,4 @@ pip install -r ../data-collection-requirements.txt
 ```
 
 This will install packages such as `h5py` and `torch` which are needed for data collection scripts.
-
----
 
