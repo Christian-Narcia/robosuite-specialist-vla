@@ -1,4 +1,0 @@
-h5py
-
-# torch-2.10 installed in this environment
-torch
