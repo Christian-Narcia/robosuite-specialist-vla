@@ -47,9 +47,14 @@
     <camera mode="fixed" name="agentview" pos="0.5 0 1.35" quat="0.653 0.271 0.271 0.653"/>
     <!-- side view -->
     <camera mode="fixed" name="sideview" pos="-0.05651774593317116 1.2761224129427358 1.4879572214102434" quat="0.009905065491771751 0.006877963156909582 0.5912228352893879 0.806418094001364" />
+    
+    <!-- top down -->
+    <camera mode="fixed" name="topdown" pos="-0.2 0 2.5" quat="0.7071 0 0 0.7071" fovy="60"/>
     <!-- lbview view -->
+    <!-- <camera mode="fixed" name="lbview" pos="-0.5 0.75 1.35"  quat="-0.21 -0.12 0.46 0.85"/> -->
     <camera mode="fixed" name="lbview" pos="-0.5 0.75 1.35"  quat="-0.21 -0.12 0.46 0.85"/>
     <!-- rbview view -->
+    <!-- <camera mode="fixed" name="rbview" pos="-0.6 -0.75 1.2" quat="-0.75  -0.55  0.22  0.29"/> -->
     <camera mode="fixed" name="rbview" pos="-.2 -.75 1.2" euler="1.1  -.15  0" fovy="60"/>
   </worldbody>
 </mujoco>

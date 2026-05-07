@@ -1,4 +1,8 @@
 from collections import OrderedDict
+import os
+
+# Fix OpenMP duplicate library error on Windows
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import numpy as np
 
@@ -12,9 +16,10 @@ from robosuite.utils.placement_samplers import UniformRandomSampler, SequentialC
 from robosuite.utils.transform_utils import convert_quat
 
 
-class LiftTarget(ManipulationEnv):
+class PlaceTask(ManipulationEnv):
     """
-    This class corresponds to the lifting task for a single robot arm.
+    Move task environment where the gripper starts grasping a randomly spawned cube
+    and must move it to a target zone.
 
     Args:
         robots (str or list of str): Specification for specific robot arm(s) to be instantiated within this env
@@ -22,115 +27,59 @@ class LiftTarget(ManipulationEnv):
             Note: Must be a single single-arm robot!
 
         env_configuration (str): Specifies how to position the robots within the environment (default is "default").
-            For most single arm environments, this argument has no impact on the robot setup.
 
         controller_configs (str or list of dict): If set, contains relevant controller parameters for creating a
-            custom controller. Else, uses the default controller for this specific task. Should either be single
-            dict if same controller is to be used for all robots or else it should be a list of the same length as
-            "robots" param
+            custom controller. Else, uses the default controller for this specific task.
 
-        gripper_types (str or list of str): type of gripper, used to instantiate
-            gripper models from gripper factory. Default is "default", which is the default grippers(s) associated
-            with the robot(s) the 'robots' specification. None removes the gripper, and any other (valid) model
-            overrides the default gripper. Should either be single str if same gripper type is to be used for all
-            robots or else it should be a list of the same length as "robots" param
+        gripper_types (str or list of str): type of gripper, used to instantiate gripper models from gripper factory.
 
         initialization_noise (dict or list of dict): Dict containing the initialization noise parameters.
-            The expected keys and corresponding value types are specified below:
-
-            :`'magnitude'`: The scale factor of uni-variate random noise applied to each of a robot's given initial
-                joint positions. Setting this value to `None` or 0.0 results in no noise being applied.
-                If "gaussian" type of noise is applied then this magnitude scales the standard deviation applied,
-                If "uniform" type of noise is applied then this magnitude sets the bounds of the sampling range
-            :`'type'`: Type of noise to apply. Can either specify "gaussian" or "uniform"
-
-            Should either be single dict if same noise value is to be used for all robots or else it should be a
-            list of the same length as "robots" param
-
-            :Note: Specifying "default" will automatically use the default noise settings.
-                Specifying None will automatically create the required dict with "magnitude" set to 0.0.
 
         table_full_size (3-tuple): x, y, and z dimensions of the table.
 
-        table_friction (3-tuple): the three mujoco friction parameters for
-            the table.
+        table_friction (3-tuple): the three mujoco friction parameters for the table.
 
         use_camera_obs (bool): if True, every observation includes rendered image(s)
 
-        use_object_obs (bool): if True, include object (cube) information in
-            the observation.
+        use_object_obs (bool): if True, include object (cube) information in the observation.
 
         reward_scale (None or float): Scales the normalized reward function by the amount specified.
-            If None, environment reward remains unnormalized
 
         reward_shaping (bool): if True, use dense rewards.
 
-        placement_initializer (ObjectPositionSampler): if provided, will
-            be used to place objects on every reset, else a UniformRandomSampler
-            is used by default.
+        placement_initializer (ObjectPositionSampler): if provided, will be used to place objects on every reset.
 
-        has_renderer (bool): If true, render the simulation state in
-            a viewer instead of headless mode.
+        has_renderer (bool): If true, render the simulation state in a viewer instead of headless mode.
 
         has_offscreen_renderer (bool): True if using off-screen rendering
 
-        render_camera (str): Name of camera to render if `has_renderer` is True. Setting this value to 'None'
-            will result in the default angle being applied, which is useful as it can be dragged / panned by
-            the user using the mouse
+        render_camera (str): Name of camera to render if `has_renderer` is True.
 
-        render_collision_mesh (bool): True if rendering collision meshes in camera. False otherwise.
+        render_collision_mesh (bool): True if rendering collision meshes in camera.
 
-        render_visual_mesh (bool): True if rendering visual meshes in camera. False otherwise.
+        render_visual_mesh (bool): True if rendering visual meshes in camera.
 
         render_gpu_device_id (int): corresponds to the GPU device id to use for offscreen rendering.
-            Defaults to -1, in which case the device will be inferred from environment variables
-            (GPUS or CUDA_VISIBLE_DEVICES).
 
-        control_freq (float): how many control signals to receive in every second. This sets the amount of
-            simulation time that passes between every action input.
+        control_freq (float): how many control signals to receive in every second.
 
-        lite_physics (bool): Whether to optimize for mujoco forward and step calls to reduce total simulation overhead.
-            Set to False to preserve backward compatibility with datasets collected in robosuite <= 1.4.1.
+        lite_physics (bool): Whether to optimize for mujoco forward and step calls.
 
         horizon (int): Every episode lasts for exactly @horizon timesteps.
 
         ignore_done (bool): True if never terminating the environment (ignore @horizon).
 
-        hard_reset (bool): If True, re-loads model, sim, and render object upon a reset call, else,
-            only calls sim.reset and resets all robosuite-internal variables
+        hard_reset (bool): If True, re-loads model, sim, and render object upon a reset call.
 
-        camera_names (str or list of str): name of camera to be rendered. Should either be single str if
-            same name is to be used for all cameras' rendering or else it should be a list of cameras to render.
+        camera_names (str or list of str): name of camera to be rendered.
 
-            :Note: At least one camera must be specified if @use_camera_obs is True.
+        camera_heights (int or list of int): height of camera frame.
 
-            :Note: To render all robots' cameras of a certain type (e.g.: "robotview" or "eye_in_hand"), use the
-                convention "all-{name}" (e.g.: "all-robotview") to automatically render all camera images from each
-                robot's camera list).
+        camera_widths (int or list of int): width of camera frame.
 
-        camera_heights (int or list of int): height of camera frame. Should either be single int if
-            same height is to be used for all cameras' frames or else it should be a list of the same length as
-            "camera names" param.
+        camera_depths (bool or list of bool): True if rendering RGB-D, and RGB otherwise.
 
-        camera_widths (int or list of int): width of camera frame. Should either be single int if
-            same width is to be used for all cameras' frames or else it should be a list of the same length as
-            "camera names" param.
-
-        camera_depths (bool or list of bool): True if rendering RGB-D, and RGB otherwise. Should either be single
-            bool if same depth setting is to be used for all cameras or else it should be a list of the same length as
-            "camera names" param.
-
-        camera_segmentations (None or str or list of str or list of list of str): Camera segmentation(s) to use
-            for each camera. Valid options are:
-
-                `None`: no segmentation sensor used
-                `'instance'`: segmentation at the class-instance level
-                `'class'`: segmentation at the class level
-                `'element'`: segmentation at the per-geom level
-
-            If not None, multiple types of segmentations can be specified. A [list of str / str or None] specifies
-            [multiple / a single] segmentation(s) to use for all cameras. A list of list of str specifies per-camera
-            segmentation setting(s) to use.
+        camera_segmentations (None or str or list of str or list of list of str): Camera segmentation(s) to use.
 
     Raises:
         AssertionError: [Invalid number of robots specified]
@@ -214,74 +163,70 @@ class LiftTarget(ManipulationEnv):
 
     def reward(self, action=None):
         """
-        Reward function for the task.
-
-        Sparse un-normalized reward:
-
-            - a discrete reward of 2.25 is provided if the cube is lifted
-
-        Un-normalized summed components if using reward shaping:
-
-            - Reaching: in [0, 1], to encourage the arm to reach the cube
-            - Grasping: in {0, 0.25}, non-zero if arm is grasping the cube
-            - Lifting: in {0, 1}, non-zero if arm has lifted the cube
-
-        The sparse reward only consists of the lifting component.
-
-        Note that the final reward is normalized and scaled by
-        reward_scale / 2.25 as well so that the max score is equal to reward_scale
-
-        Args:
-            action (np array): [NOT USED]
-
-        Returns:
-            float: reward value
+        Reward function for move task.
+        Simple reward based on cube-to-target distance with penalty for dropping.
         """
         reward = 0.0
 
-        # sparse completion reward
+        # --- State ---
+        grasping_cube = self._check_grasp(gripper=self.robots[0].gripper, object_geoms=self.cube)
+        cube_pos = np.array(self.sim.data.body_xpos[self.cube_body_id])
+        target_pos = np.array(self.sim.data.body_xpos[self.target_zone_body_id])
+        
+        # Distance from cube to target (3D)
+        dist = np.linalg.norm(cube_pos - target_pos)
+        
+        # Distance-based reward: closer to target = higher reward
+        # Use negative distance so closer is better, scaled for reasonable range
+        reward = -dist
+        
+        # Penalty for dropping the cube
+        if not grasping_cube:
+            reward -= 2.0
+        
+        cube_pos = self.sim.data.body_xpos[self.cube_body_id]
+        target_pos = self.sim.data.body_xpos[self.target_zone_body_id]
+
+        # Simple distance check
+        dist = np.linalg.norm(cube_pos[:2] - target_pos[:2])  # XY distance
+        # print(f"distance from cube to target: {dist:.4f}m")
+        # Bonus for success
         if self._check_success():
-            # print("Cube successfully!")
-            reward = 2.25
+            reward += 10.0
 
-        # use a shaping reward
-        elif self.reward_shaping:
-
-            # reaching reward
-            dist = self._gripper_to_target(
-                gripper=self.robots[0].gripper, target=self.cube.root_body, target_type="body", return_distance=True
-            )
-            reaching_reward = 1 - np.tanh(10.0 * dist)
-            reward += reaching_reward
-
-            # grasping reward
-            if self._check_grasp(gripper=self.robots[0].gripper, object_geoms=self.cube):
-                reward += 0.25
-
-            ############## tilting penalty ##############
-            # # Get current orientation
-            # site_id = self.sim.model.site_name2id("gripper0_right_grip_site_cylinder")
-            # current_rot_mat = self.sim.data.site_xmat[site_id].reshape((3, 3))
-            # current_z = current_rot_mat[:, 2]
-
-            # # Calculate angle with respect to initial Z-axis
-            # cos_theta = np.clip(np.dot(current_z, self.initial_gripper_z), -1.0, 1.0)
-            # angle_rad = np.arccos(cos_theta)
-            # angle_deg = np.degrees(angle_rad)
-
-            # # Apply tilt penalty if angle exceeds threshold
-            # if angle_deg > 45:
-            #     # print(f"Gripper tilt angle: {angle_deg:.2f} degrees")
-            #     reward -= (angle_rad*.01)  # or use a scaled penalty, e.g., reward -= 10 * angle_rad
-
-            ########################################################
-
-
-        # Scale reward if requested
+        # --- Scale ---
         if self.reward_scale is not None:
-            reward *= self.reward_scale / 2.25
+            reward *= self.reward_scale
 
         return reward
+
+    def _cube_to_target_distance(self):
+        """
+        Calculate the horizontal distance between the cube and the target zone center.
+
+        Returns:
+            float: Euclidean distance in the XY plane between cube and target zone
+        """
+        cube_pos = self.sim.data.body_xpos[self.cube_body_id]
+        target_pos = self.sim.data.body_xpos[self.target_zone_body_id]
+        # Only consider XY distance (horizontal plane)
+        return np.linalg.norm(cube_pos[:2] - target_pos[:2])
+
+    def _cube_on_target(self):
+        """
+        Check if the cube is at the target zone.
+
+        Returns:
+            bool: True if cube is within threshold distance of target
+        """
+        cube_pos = self.sim.data.body_xpos[self.cube_body_id]
+        target_pos = self.sim.data.body_xpos[self.target_zone_body_id]
+
+        # Simple distance check
+        dist = np.linalg.norm(cube_pos[:2] - target_pos[:2])  # XY distance
+        # print(f"distance from cube to target: {dist:.4f}m")
+        
+        return dist < 0.07   
 
     def _load_model(self):
         """
@@ -339,14 +284,14 @@ class LiftTarget(ManipulationEnv):
         )
         
         # Create target zone (twice the width and length of the cube, very thin)
-        # This is a visual marker showing where to place/lift the cube
+        # This is a visual marker showing where to place the cube
         target_size = [self.cube_size[0] * 2, self.cube_size[1] * 2, 0.002]  # Thin flat square
-
+        
         self.target_zone = BoxObject(
             name="target_zone",
             size_min=target_size,
             size_max=target_size,
-            rgba=[1, 0, 0, 1],
+            rgba=[1, 0, 0, 1],  
             material=redwood,
             joints=None,  # No joints makes it static/immovable
         )
@@ -354,7 +299,7 @@ class LiftTarget(ManipulationEnv):
         # Calculate table half-dimensions for clarity
         table_half_width = (self.table_full_size[0] / 2.0) - 0.2  # Adjusted to ensure cube is reachable
         table_half_depth = (self.table_full_size[1] / 2.0) - 0.2
-
+        
         # Use SequentialCompositeSampler to place cube first, then target zone
         # This ensures the target zone doesn't spawn under the cube
         self.placement_initializer = SequentialCompositeSampler(
@@ -383,7 +328,7 @@ class LiftTarget(ManipulationEnv):
                 name="TargetZoneSampler",
                 mujoco_objects=self.target_zone,
                 x_range=[-table_half_width, table_half_width],
-                y_range=[-table_half_depth, table_half_depth],
+                y_range=[-table_half_depth, table_half_depth],  # On the table surface
                 rotation=None,
                 ensure_object_boundary_in_range=True,
                 ensure_valid_placement=True,  # Ensures no overlap with previously placed objects (cube)
@@ -434,10 +379,11 @@ class LiftTarget(ManipulationEnv):
             def cube_quat(obs_cache):
                 return convert_quat(np.array(self.sim.data.body_xquat[self.cube_body_id]), to="xyzw")
             
+            
             @sensor(modality=modality)
             def target_zone_pos(obs_cache):
                 return np.array(self.sim.data.body_xpos[self.target_zone_body_id])
-            
+
             sensors = [cube_pos, cube_quat, target_zone_pos]
 
             arm_prefixes = self._get_arm_prefixes(self.robots[0], include_robot_name=False)
@@ -459,7 +405,6 @@ class LiftTarget(ManipulationEnv):
                 )
 
 
-
         return observables
 
     def _reset_internal(self):
@@ -467,11 +412,6 @@ class LiftTarget(ManipulationEnv):
         Resets simulation internal configurations.
         """
         super()._reset_internal()
-        # Save initial gripper Z-axis orientation for tilt comparison
-        site_name = "gripper0_right_grip_site_cylinder"
-        site_id = self.sim.model.site_name2id(site_name)
-        initial_rot_mat = self.sim.data.site_xmat[site_id].reshape((3, 3))
-        self.initial_gripper_z = initial_rot_mat[:, 2].copy()
 
         # Reset all object positions using initializer sampler if we're not directly loading from an xml
         if not self.deterministic_reset:
@@ -507,29 +447,52 @@ class LiftTarget(ManipulationEnv):
 
     def _check_success(self):
         """
-        Check if cube has been lifted.
+        Check if cube has been successfully placed on the target zone.
+        Requires the cube on the target, the gripper not grasping, AND the
+        gripper fingers to be completely open.
 
         Returns:
-            bool: True if cube has been lifted
+            bool: True if cube is placed on target zone and gripper is fully open
         """
-        # LIFT
-        cube_height = self.sim.data.body_xpos[self.cube_body_id][2]
-        table_height = self.model.mujoco_arena.table_offset[2]
+        # Check that the cube is in contact with the target zone
+        cube_on_target = self.check_contact(self.cube, self.target_zone)
+        if not cube_on_target:
+            return False
 
-        # cube is higher than the table top above a margin
-        return cube_height > table_height + 0.03
+        # Check that the gripper has released the cube
+        grasping = self._check_grasp(gripper=self.robots[0].gripper, object_geoms=self.cube)
+        if grasping:
+            return False
 
-        # REACH
-        # dist = self._gripper_to_target(
-        #         gripper=self.robots[0].gripper, target=self.cube.root_body, target_type="body", return_distance=True
-        #     )
+        # Check that the gripper is completely open
+        robot = self.robots[0]
+        for arm in robot._ref_gripper_joint_pos_indexes:
+            gripper_idxs = robot._ref_gripper_joint_pos_indexes[arm]
+            for idx in gripper_idxs:
+                qpos = self.sim.data.qpos[idx]
+                # Get joint limits (lo, hi) for this finger
+                jnt_id = self.sim.model.jnt_qposadr.tolist().index(idx) if idx in self.sim.model.jnt_qposadr else None
+                if jnt_id is None:
+                    # Find joint whose qposadr matches idx
+                    for j in range(self.sim.model.njnt):
+                        if self.sim.model.jnt_qposadr[j] == idx:
+                            jnt_id = j
+                            break
+                if jnt_id is not None:
+                    lo = self.sim.model.jnt_range[jnt_id][0]
+                    hi = self.sim.model.jnt_range[jnt_id][1]
+                    full_range = hi - lo
+                    # Finger must be at least 90% open
+                    if qpos < lo + 0.9 * full_range:
+                        return False
 
-        # # gripper is close enough to the cube
-        # return dist < 0.06
-        # return dist < 0.07
+        return True
     
     def step(self, action):
         obs, reward, done, info = super().step(action)
         if self._check_success():
             done = True
+            info["success"] = True
+        else:
+            info["success"] = False
         return obs, reward, done, info

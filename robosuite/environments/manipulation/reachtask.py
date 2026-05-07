@@ -12,9 +12,9 @@ from robosuite.utils.placement_samplers import UniformRandomSampler, SequentialC
 from robosuite.utils.transform_utils import convert_quat
 
 
-class LiftTarget(ManipulationEnv):
+class ReachTask(ManipulationEnv):
     """
-    This class corresponds to the lifting task for a single robot arm.
+    This class corresponds to the reaching task for a single robot arm.
 
     Args:
         robots (str or list of str): Specification for specific robot arm(s) to be instantiated within this env
@@ -339,22 +339,22 @@ class LiftTarget(ManipulationEnv):
         )
         
         # Create target zone (twice the width and length of the cube, very thin)
-        # This is a visual marker showing where to place/lift the cube
+        # This is a visual marker showing where to place the cube
         target_size = [self.cube_size[0] * 2, self.cube_size[1] * 2, 0.002]  # Thin flat square
 
         self.target_zone = BoxObject(
             name="target_zone",
             size_min=target_size,
             size_max=target_size,
-            rgba=[1, 0, 0, 1],
+            rgba=[1, 0, 0, 1],  
             material=redwood,
             joints=None,  # No joints makes it static/immovable
         )
 
         # Calculate table half-dimensions for clarity
-        table_half_width = (self.table_full_size[0] / 2.0) - 0.2  # Adjusted to ensure cube is reachable
-        table_half_depth = (self.table_full_size[1] / 2.0) - 0.2
-
+        table_half_width = (self.table_full_size[0] / 2.0)- 0.2  # Adjusted to ensure cube is reachable
+        table_half_depth = (self.table_full_size[1] / 2.0)- 0.2
+        
         # Use SequentialCompositeSampler to place cube first, then target zone
         # This ensures the target zone doesn't spawn under the cube
         self.placement_initializer = SequentialCompositeSampler(
@@ -386,9 +386,9 @@ class LiftTarget(ManipulationEnv):
                 y_range=[-table_half_depth, table_half_depth],
                 rotation=None,
                 ensure_object_boundary_in_range=True,
-                ensure_valid_placement=True,  # Ensures no overlap with previously placed objects (cube)
+                ensure_valid_placement=True,
                 reference_pos=self.table_offset,
-                z_offset=0.001,  # Slightly above table surface
+                z_offset=0.001,
             )
         )
 
@@ -458,7 +458,17 @@ class LiftTarget(ManipulationEnv):
                     sampling_rate=self.control_freq,
                 )
 
-
+            # @sensor(modality="touch")
+            # def right_finger_pressure(obs_cache):
+            #     sensor_id = self.sim.model.sensor_name2id("robot0_gripper_right_sensor")
+            #     pressure_value = self.sim.data.sensordata[sensor_id]
+            #     return pressure_value
+            # # right finger pressure sensor observable once
+            # observables["gripper_right_sensor"] = Observable(
+            #     name="gripper_right_sensor",
+            #     sensor=right_finger_pressure,
+            #     sampling_rate=self.control_freq,
+            # )
 
         return observables
 
@@ -512,20 +522,14 @@ class LiftTarget(ManipulationEnv):
         Returns:
             bool: True if cube has been lifted
         """
-        # LIFT
-        cube_height = self.sim.data.body_xpos[self.cube_body_id][2]
-        table_height = self.model.mujoco_arena.table_offset[2]
-
-        # cube is higher than the table top above a margin
-        return cube_height > table_height + 0.03
 
         # REACH
-        # dist = self._gripper_to_target(
-        #         gripper=self.robots[0].gripper, target=self.cube.root_body, target_type="body", return_distance=True
-        #     )
+        dist = self._gripper_to_target(
+                gripper=self.robots[0].gripper, target=self.cube.root_body, target_type="body", return_distance=True
+            )
 
-        # # gripper is close enough to the cube
-        # return dist < 0.06
+        # gripper is close enough to the cube
+        return dist < 0.06
         # return dist < 0.07
     
     def step(self, action):

@@ -1,4 +1,8 @@
 from collections import OrderedDict
+import os
+
+# Fix OpenMP duplicate library error on Windows
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import numpy as np
 
@@ -12,7 +16,7 @@ from robosuite.utils.placement_samplers import UniformRandomSampler, SequentialC
 from robosuite.utils.transform_utils import convert_quat
 
 
-class LiftTarget(ManipulationEnv):
+class GrabTaskv2(ManipulationEnv):
     """
     This class corresponds to the lifting task for a single robot arm.
 
@@ -136,6 +140,11 @@ class LiftTarget(ManipulationEnv):
         AssertionError: [Invalid number of robots specified]
     """
 
+    # Task mode constants
+    TASK_FULL = "full"          # Full pick and place task (default)
+    TASK_REACH = "reach"        # End when gripper reaches cube
+    TASK_GRASP = "grasp"        # End when gripper grasps cube
+
     def __init__(
         self,
         robots,
@@ -168,6 +177,11 @@ class LiftTarget(ManipulationEnv):
         camera_segmentations=None,  # {None, instance, class, element}
         renderer="mjviewer",
         renderer_config=None,
+        task_mode="grasp",  # "full", "reach", or "grasp" - default to grasp
+        reach_threshold=0.05,  # Distance threshold for reach task (meters)
+        spawn_gripper_near_cube=True,  # If True, spawn gripper 0.07m from cube
+        gripper_spawn_distance=0.08,  # Distance from cube to spawn gripper
+        use_target_zone=True,  # If True, include green target platform
     ):
         # settings for table top
         self.table_full_size = table_full_size
@@ -183,6 +197,23 @@ class LiftTarget(ManipulationEnv):
 
         # object placement initializer
         self.placement_initializer = placement_initializer
+        
+        # Task mode configuration
+        assert task_mode in [self.TASK_FULL, self.TASK_REACH, self.TASK_GRASP], \
+            f"Invalid task_mode '{task_mode}'. Must be one of: 'full', 'reach', 'grasp'"
+        self.task_mode = task_mode
+        self.reach_threshold = reach_threshold
+        
+        # Gripper spawn configuration
+        self.spawn_gripper_near_cube = spawn_gripper_near_cube
+        self.gripper_spawn_distance = gripper_spawn_distance
+        
+        # Target zone configuration
+        self.use_target_zone = use_target_zone
+        
+        # Track previous distance for movement reward
+        self._prev_cube_to_target_xy = None
+        self._prev_cube_to_target_3d = None
 
         super().__init__(
             robots=robots,
@@ -214,34 +245,16 @@ class LiftTarget(ManipulationEnv):
 
     def reward(self, action=None):
         """
-        Reward function for the task.
-
-        Sparse un-normalized reward:
-
-            - a discrete reward of 2.25 is provided if the cube is lifted
-
-        Un-normalized summed components if using reward shaping:
-
-            - Reaching: in [0, 1], to encourage the arm to reach the cube
-            - Grasping: in {0, 0.25}, non-zero if arm is grasping the cube
-            - Lifting: in {0, 1}, non-zero if arm has lifted the cube
-
-        The sparse reward only consists of the lifting component.
-
-        Note that the final reward is normalized and scaled by
-        reward_scale / 2.25 as well so that the max score is equal to reward_scale
-
-        Args:
-            action (np array): [NOT USED]
-
-        Returns:
-            float: reward value
+        Reward function for grab task with strong incentives for grasping:
+        - Reward for reaching the cube (distance-based)
+        - Reward for gripper contact with cube
+        - Reward for gripper closing when near cube
+        - Large reward for successful grasp
         """
         reward = 0.0
 
         # sparse completion reward
         if self._check_success():
-            # print("Cube successfully!")
             reward = 2.25
 
         # use a shaping reward
@@ -258,24 +271,6 @@ class LiftTarget(ManipulationEnv):
             if self._check_grasp(gripper=self.robots[0].gripper, object_geoms=self.cube):
                 reward += 0.25
 
-            ############## tilting penalty ##############
-            # # Get current orientation
-            # site_id = self.sim.model.site_name2id("gripper0_right_grip_site_cylinder")
-            # current_rot_mat = self.sim.data.site_xmat[site_id].reshape((3, 3))
-            # current_z = current_rot_mat[:, 2]
-
-            # # Calculate angle with respect to initial Z-axis
-            # cos_theta = np.clip(np.dot(current_z, self.initial_gripper_z), -1.0, 1.0)
-            # angle_rad = np.arccos(cos_theta)
-            # angle_deg = np.degrees(angle_rad)
-
-            # # Apply tilt penalty if angle exceeds threshold
-            # if angle_deg > 45:
-            #     # print(f"Gripper tilt angle: {angle_deg:.2f} degrees")
-            #     reward -= (angle_rad*.01)  # or use a scaled penalty, e.g., reward -= 10 * angle_rad
-
-            ########################################################
-
 
         # Scale reward if requested
         if self.reward_scale is not None:
@@ -283,6 +278,7 @@ class LiftTarget(ManipulationEnv):
 
         return reward
 
+    
     def _load_model(self):
         """
         Loads an xml model, puts it in self.model
@@ -312,13 +308,6 @@ class LiftTarget(ManipulationEnv):
             "specular": "0.4",
             "shininess": "0.1",
         }
-        redwood = CustomMaterial(
-            texture="WoodRed",
-            tex_name="redwood",
-            mat_name="redwood_mat",
-            tex_attrib=tex_attrib,
-            mat_attrib=mat_attrib,
-        )
         greenwood = CustomMaterial(
             texture="WoodGreen",
             tex_name="greenwood",
@@ -339,22 +328,30 @@ class LiftTarget(ManipulationEnv):
         )
         
         # Create target zone (twice the width and length of the cube, very thin)
-        # This is a visual marker showing where to place/lift the cube
-        target_size = [self.cube_size[0] * 2, self.cube_size[1] * 2, 0.002]  # Thin flat square
-
-        self.target_zone = BoxObject(
-            name="target_zone",
-            size_min=target_size,
-            size_max=target_size,
-            rgba=[1, 0, 0, 1],
-            material=redwood,
-            joints=None,  # No joints makes it static/immovable
+        # This is a visual marker showing where to place the cube
+        self.target_zone = None
+        if self.use_target_zone:
+            target_size = [self.cube_size[0] * 2, self.cube_size[1] * 2, 0.002]  # Thin flat square
+            redwood = CustomMaterial(
+            texture="WoodRed",
+            tex_name="redwood",
+            mat_name="redwood_mat",
+            tex_attrib=tex_attrib,
+            mat_attrib=mat_attrib,
         )
+            self.target_zone = BoxObject(
+                name="target_zone",
+                size_min=target_size,
+                size_max=target_size,
+                rgba=[1, 0, 0, 1],  # Red color
+                material=redwood,
+                joints=None,  # No joints makes it static/immovable
+            )
 
         # Calculate table half-dimensions for clarity
         table_half_width = (self.table_full_size[0] / 2.0) - 0.2  # Adjusted to ensure cube is reachable
         table_half_depth = (self.table_full_size[1] / 2.0) - 0.2
-
+        
         # Use SequentialCompositeSampler to place cube first, then target zone
         # This ensures the target zone doesn't spawn under the cube
         self.placement_initializer = SequentialCompositeSampler(
@@ -378,25 +375,29 @@ class LiftTarget(ManipulationEnv):
         
         # Add target zone sampler second - placed on the table
         # SequentialCompositeSampler ensures target won't spawn under the cube
-        self.placement_initializer.append_sampler(
-            UniformRandomSampler(
-                name="TargetZoneSampler",
-                mujoco_objects=self.target_zone,
-                x_range=[-table_half_width, table_half_width],
-                y_range=[-table_half_depth, table_half_depth],
-                rotation=None,
-                ensure_object_boundary_in_range=True,
-                ensure_valid_placement=True,  # Ensures no overlap with previously placed objects (cube)
-                reference_pos=self.table_offset,
-                z_offset=0.001,  # Slightly above table surface
+        if self.use_target_zone:
+            self.placement_initializer.append_sampler(
+                UniformRandomSampler(
+                    name="TargetZoneSampler",
+                    mujoco_objects=self.target_zone,
+                    x_range=[-table_half_width, table_half_width],
+                    y_range=[-table_half_depth, table_half_depth],  # On the table surface
+                    rotation=None,
+                    ensure_object_boundary_in_range=True,
+                    ensure_valid_placement=True,  # Ensures no overlap with previously placed objects (cube)
+                    reference_pos=self.table_offset,
+                    z_offset=0.001,  # Slightly above table surface
+                )
             )
-        )
 
         # task includes arena, robot, and objects of interest
+        mujoco_objects = [self.cube]
+        if self.use_target_zone:
+            mujoco_objects.append(self.target_zone)
         self.model = ManipulationTask(
             mujoco_arena=mujoco_arena,
             mujoco_robots=[robot.robot_model for robot in self.robots],
-            mujoco_objects=[self.cube, self.target_zone],
+            mujoco_objects=mujoco_objects,
         )
         
     def _setup_references(self):
@@ -409,7 +410,9 @@ class LiftTarget(ManipulationEnv):
 
         # Additional object references from this env
         self.cube_body_id = self.sim.model.body_name2id(self.cube.root_body)
-        self.target_zone_body_id = self.sim.model.body_name2id(self.target_zone.root_body)
+        self.target_zone_body_id = None
+        if self.use_target_zone:
+            self.target_zone_body_id = self.sim.model.body_name2id(self.target_zone.root_body)
 
     def _setup_observables(self):
         """
@@ -434,11 +437,14 @@ class LiftTarget(ManipulationEnv):
             def cube_quat(obs_cache):
                 return convert_quat(np.array(self.sim.data.body_xquat[self.cube_body_id]), to="xyzw")
             
-            @sensor(modality=modality)
-            def target_zone_pos(obs_cache):
-                return np.array(self.sim.data.body_xpos[self.target_zone_body_id])
             
-            sensors = [cube_pos, cube_quat, target_zone_pos]
+            sensors = [cube_pos, cube_quat]
+            
+            if self.use_target_zone:
+                @sensor(modality=modality)
+                def target_zone_pos(obs_cache):
+                    return np.array(self.sim.data.body_xpos[self.target_zone_body_id])
+                sensors.append(target_zone_pos)
 
             arm_prefixes = self._get_arm_prefixes(self.robots[0], include_robot_name=False)
             full_prefixes = self._get_arm_prefixes(self.robots[0])
@@ -459,7 +465,6 @@ class LiftTarget(ManipulationEnv):
                 )
 
 
-
         return observables
 
     def _reset_internal(self):
@@ -467,11 +472,9 @@ class LiftTarget(ManipulationEnv):
         Resets simulation internal configurations.
         """
         super()._reset_internal()
-        # Save initial gripper Z-axis orientation for tilt comparison
-        site_name = "gripper0_right_grip_site_cylinder"
-        site_id = self.sim.model.site_name2id(site_name)
-        initial_rot_mat = self.sim.data.site_xmat[site_id].reshape((3, 3))
-        self.initial_gripper_z = initial_rot_mat[:, 2].copy()
+        # Reset previous distance tracking
+        self._prev_cube_to_target_xy = None
+        self._prev_cube_to_target_3d = None
 
         # Reset all object positions using initializer sampler if we're not directly loading from an xml
         if not self.deterministic_reset:
@@ -480,14 +483,138 @@ class LiftTarget(ManipulationEnv):
             object_placements = self.placement_initializer.sample()
 
             # Loop through all objects and reset their positions
+            cube_pos = None
             for obj_pos, obj_quat, obj in object_placements.values():
                 if obj.joints is not None and len(obj.joints) > 0:
                     # Objects with joints: set joint position
                     self.sim.data.set_joint_qpos(obj.joints[0], np.concatenate([np.array(obj_pos), np.array(obj_quat)]))
+                    # Store cube position for gripper positioning
+                    if obj.name == "cube":
+                        cube_pos = np.array(obj_pos)
                 else:
                     # Static objects (no joints): set body position directly in the model
                     body_id = self.sim.model.body_name2id(obj.root_body)
                     self.sim.model.body_pos[body_id] = obj_pos
+            
+            # Position gripper near the cube if enabled
+            if self.spawn_gripper_near_cube and cube_pos is not None:
+                self._position_gripper_near_cube(cube_pos)
+
+    def _position_gripper_near_cube(self, cube_pos):
+        """
+        Position the gripper at a specified distance above the cube with random XY offset.
+        Uses inverse kinematics to find joint positions that place the gripper near the cube.
+        Randomly opens or closes the gripper.
+
+        Args:
+            cube_pos (np.array): 3D position of the cube [x, y, z]
+        """
+        import mujoco
+
+        # Target position: above the cube with random XY offset
+        target_pos = cube_pos.copy()
+        xy_offset_range = 0.03  # max XY offset in meters
+        target_pos[0] += np.random.uniform(-xy_offset_range, xy_offset_range)
+        target_pos[1] += np.random.uniform(-xy_offset_range, xy_offset_range)
+        target_pos[2] += self.gripper_spawn_distance  # Position above the cube
+        
+        # Get the robot
+        robot = self.robots[0]
+        
+        try:
+            # Get the end effector site id
+            # For single arm robots, gripper is accessed via robot.gripper["right"] or similar
+            arm = robot.arms[0] if hasattr(robot, 'arms') and len(robot.arms) > 0 else "right"
+            gripper = robot.gripper[arm] if isinstance(robot.gripper, dict) else robot.gripper
+            eef_site_name = gripper.important_sites["grip_site"]
+            eef_site_id = self.sim.model.site_name2id(eef_site_name)
+            
+            # Get arm joint qpos indices from the robot
+            # These are the indices into sim.data.qpos for the arm joints
+            arm_joint_qpos_indices = robot._ref_arm_joint_pos_indexes
+            
+            if len(arm_joint_qpos_indices) == 0:
+                print("Warning: No arm joint indices found, skipping IK positioning")
+                return
+            
+            # IK parameters
+            max_iters = 150
+            step_size = 0.5
+            tolerance = 0.003
+            damping = 0.05  # Damping for damped least squares
+            
+            for iteration in range(max_iters):
+                # Forward to update state
+                self.sim.forward()
+                
+                # Get current end effector position
+                current_pos = self.sim.data.site_xpos[eef_site_id].copy()
+                
+                # Position error
+                pos_error = target_pos - current_pos
+                error_norm = np.linalg.norm(pos_error)
+                
+                if error_norm < tolerance:
+                    break
+                
+                # Get Jacobian for the end effector site
+                jacp = np.zeros((3, self.sim.model.nv))
+                jacr = np.zeros((3, self.sim.model.nv))
+                mujoco.mj_jacSite(self.sim.model._model, self.sim.data._data, jacp, jacr, eef_site_id)
+                
+                # Extract Jacobian columns for arm joints only
+                # We need qvel indices (velocity space), which for simple joints are the same as joint indices
+                arm_joint_vel_indices = robot._ref_arm_joint_vel_indexes
+                J = jacp[:, arm_joint_vel_indices]
+                
+                # Damped least squares (more stable than pseudoinverse)
+                # dq = J^T (J J^T + λ²I)^(-1) * error
+                JJT = J @ J.T
+                damped_JJT = JJT + (damping ** 2) * np.eye(3)
+                dq = J.T @ np.linalg.solve(damped_JJT, step_size * pos_error)
+                
+                # Update arm joint positions
+                for i, qpos_idx in enumerate(arm_joint_qpos_indices):
+                    self.sim.data.qpos[qpos_idx] += dq[i]
+                
+                # Clip to joint limits
+                for qpos_idx in arm_joint_qpos_indices:
+                    # Get joint id from qpos address
+                    for jnt_id in range(self.sim.model.njnt):
+                        jnt_qpos_adr = self.sim.model.jnt_qposadr[jnt_id]
+                        if jnt_qpos_adr == qpos_idx:
+                            low, high = self.sim.model.jnt_range[jnt_id]
+                            if low < high:  # Only clip if limits are defined
+                                self.sim.data.qpos[qpos_idx] = np.clip(
+                                    self.sim.data.qpos[qpos_idx], low, high
+                                )
+                            break
+            
+            # Final forward pass to update all states
+            self.sim.forward()
+            
+            # Report final error
+            final_pos = self.sim.data.site_xpos[eef_site_id].copy()
+            final_error = np.linalg.norm(target_pos - final_pos)
+            if final_error > 0.02:  # 2cm threshold for warning
+                print(f"Warning: IK converged with error {final_error:.4f}m (target was {tolerance}m)")
+
+            # Randomly open or close the gripper
+            gripper_qpos_indices = robot._ref_gripper_joint_pos_indexes
+            if len(gripper_qpos_indices) > 0:
+                if np.random.random() < 0.5:
+                    # Closed gripper
+                    self.sim.data.qpos[gripper_qpos_indices] = 0.0
+                else:
+                    # Open gripper (use default init_qpos)
+                    self.sim.data.qpos[gripper_qpos_indices] = gripper.init_qpos
+                self.sim.forward()
+
+        except Exception as e:
+            # If IK fails, just print a warning and continue with default position
+            print(f"Warning: Could not position gripper near cube via IK: {e}")
+            import traceback
+            traceback.print_exc()
 
     def visualize(self, vis_settings):
         """
@@ -505,31 +632,70 @@ class LiftTarget(ManipulationEnv):
         if vis_settings["grippers"]:
             self._visualize_gripper_to_target(gripper=self.robots[0].gripper, target=self.cube)
 
-    def _check_success(self):
+    def _check_reach(self):
         """
-        Check if cube has been lifted.
+        Check if the gripper is close enough to the cube (reach task).
+        
+        Returns:
+            bool: True if gripper is within reach_threshold of the cube
+        """
+        gripper_to_cube_dist = self._gripper_to_target(
+            gripper=self.robots[0].gripper,
+            target=self.cube.root_body,
+            target_type="body",
+            return_distance=True,
+        )
+        return gripper_to_cube_dist < self.reach_threshold
+    
+    def _check_cube_grasp(self):
+        """
+        Check if the gripper has successfully grasped the cube.
+        
+        Returns:
+            bool: True if gripper is grasping the cube
+        """
+        return self._check_grasp(gripper=self.robots[0].gripper, object_geoms=self.cube)
+    
+    def _get_gripper_qpos(self):
+        """
+        Get the current gripper opening amount.
+        For Panda gripper: 0 = fully closed, 0.04 = fully open
+        
+        Returns:
+            float: Average gripper finger position, or None if not available
+        """
+        try:
+            robot = self.robots[0]
+            # Get gripper joint indices
+            gripper_qpos_indices = robot._ref_gripper_joint_pos_indexes
+            if len(gripper_qpos_indices) > 0:
+                gripper_qpos = self.sim.data.qpos[gripper_qpos_indices]
+                return np.mean(gripper_qpos)  # Average of both fingers
+        except Exception:
+            pass
+        return None
+    
+    def _check_place(self):
+        """
+        Check if cube has been successfully placed on the target zone (full task).
 
         Returns:
-            bool: True if cube has been lifted
+            bool: True if cube is placed on target zone
         """
-        # LIFT
-        cube_height = self.sim.data.body_xpos[self.cube_body_id][2]
-        table_height = self.model.mujoco_arena.table_offset[2]
+        return self._cube_on_target()
 
-        # cube is higher than the table top above a margin
-        return cube_height > table_height + 0.03
-
-        # REACH
-        # dist = self._gripper_to_target(
-        #         gripper=self.robots[0].gripper, target=self.cube.root_body, target_type="body", return_distance=True
-        #     )
-
-        # # gripper is close enough to the cube
-        # return dist < 0.06
-        # return dist < 0.07
+    def _check_success(self):
+        """
+        Check if the current task mode's success condition is met.
+        
+        Returns:
+            bool: True if gripper has successfully grasped the cube
+        """
+        return self._check_cube_grasp()
     
     def step(self, action):
         obs, reward, done, info = super().step(action)
         if self._check_success():
             done = True
+
         return obs, reward, done, info

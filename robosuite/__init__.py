@@ -1,8 +1,12 @@
 from robosuite.environments.base import make
 
 # Manipulation environments
-from robosuite.environments.manipulation.movetask import MoveTask
 from robosuite.environments.manipulation.lift_target import LiftTarget
+from robosuite.environments.manipulation.reachtask import ReachTask
+from robosuite.environments.manipulation.grabtask import GrabTask
+from robosuite.environments.manipulation.grabtaskv2 import GrabTaskv2
+from robosuite.environments.manipulation.movetask import MoveTask
+from robosuite.environments.manipulation.placetask import PlaceTask
 
 from robosuite.environments.manipulation.lift import Lift
 from robosuite.environments.manipulation.stack import Stack

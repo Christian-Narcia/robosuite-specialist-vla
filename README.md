@@ -1,3 +1,22 @@
+# Robosuite (Specialist VLA Fork)
+
+This is a clone of [Robosuite](https://github.com/ARISE-Initiative/robosuite) 
+modified for the Specialist VLA project.
+
+## Changes from Upstream
+- Added custom environments: 
+  - Added environment PicknPlace: `robosuite/environments/manipulation/lift_target.py`
+  - Added environment Reach: `robosuite/environments/manipulation/reachtask.py`
+  - Added environment Grab: `robosuite/environments/manipulation/grabtask.py`
+  - Added environment Move: `robosuite/environments/manipulation/movetask.py`
+  - Added environment Place: `robosuite/environments/manipulation/placetask.py`
+- Added New Cameras Assets for Tinyvla rbview and lbview: `robosuite/models/assets/arenas/table_arena.xml`
+
+For the main project see: https://github.com/Christian-Narcia/Specialist-TinyVLA
+
+---
+<!-- Original README below -->
+
 # robosuite
 
 ![gallery of_environments](docs/images/gallery.png)

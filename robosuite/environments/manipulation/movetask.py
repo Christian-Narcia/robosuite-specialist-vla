@@ -164,27 +164,37 @@ class MoveTask(ManipulationEnv):
     def reward(self, action=None):
         """
         Reward function for move task.
-        Simple distance-based reward: negative XY distance + negative Z distance.
+        Simple reward based on cube-to-target distance with penalty for dropping.
         """
-        # Get positions
+        reward = 0.0
+
+        # --- State ---
+        grasping_cube = self._check_grasp(gripper=self.robots[0].gripper, object_geoms=self.cube)
         cube_pos = np.array(self.sim.data.body_xpos[self.cube_body_id])
         target_pos = np.array(self.sim.data.body_xpos[self.target_zone_body_id])
         
-        # XY distance (horizontal)
-        xy_dist = np.linalg.norm(cube_pos[:2] - target_pos[:2])
+        # Distance from cube to target (3D)
+        dist = np.linalg.norm(cube_pos - target_pos)
         
-        # Z distance (vertical) - target Z is table height + cube half-height
-        target_z = self.table_offset[2] + self.cube_size[2]
-        z_dist = abs(cube_pos[2] - target_z)
+        # Distance-based reward: closer to target = higher reward
+        # Use negative distance so closer is better, scaled for reasonable range
+        reward = -dist
         
-        # Simple negative distance reward (closer = higher reward)
-        reward = -xy_dist - z_dist
+        # Penalty for dropping the cube
+        if not grasping_cube:
+            reward -= 2.0
         
+        cube_pos = self.sim.data.body_xpos[self.cube_body_id]
+        target_pos = self.sim.data.body_xpos[self.target_zone_body_id]
+
+        # Simple distance check
+        dist = np.linalg.norm(cube_pos[:2] - target_pos[:2])  # XY distance
+        # print(f"distance from cube to target: {dist:.4f}m")
         # Bonus for success
         if self._check_success():
             reward += 10.0
 
-        # Scale
+        # --- Scale ---
         if self.reward_scale is not None:
             reward *= self.reward_scale
 
@@ -192,39 +202,31 @@ class MoveTask(ManipulationEnv):
 
     def _cube_to_target_distance(self):
         """
-        Calculate the XY + Z distance between the cube and the target.
+        Calculate the horizontal distance between the cube and the target zone center.
 
         Returns:
-            tuple: (xy_dist, z_dist)
+            float: Euclidean distance in the XY plane between cube and target zone
         """
         cube_pos = self.sim.data.body_xpos[self.cube_body_id]
         target_pos = self.sim.data.body_xpos[self.target_zone_body_id]
-        
-        xy_dist = np.linalg.norm(cube_pos[:2] - target_pos[:2])
-        target_z = self.table_offset[2] + self.cube_size[2]
-        z_dist = abs(cube_pos[2] - target_z)
-        
-        return xy_dist, z_dist
+        # Only consider XY distance (horizontal plane)
+        return np.linalg.norm(cube_pos[:2] - target_pos[:2])
 
     def _cube_on_target(self):
         """
         Check if the cube is at the target zone.
 
         Returns:
-            bool: True if cube is within threshold distance of target (XY and Z)
+            bool: True if cube is within threshold distance of target
         """
-        cube_pos = np.array(self.sim.data.body_xpos[self.cube_body_id])
-        target_pos = np.array(self.sim.data.body_xpos[self.target_zone_body_id])
+        cube_pos = self.sim.data.body_xpos[self.cube_body_id]
+        target_pos = self.sim.data.body_xpos[self.target_zone_body_id]
+
+        # Simple distance check
+        dist = np.linalg.norm(cube_pos[:2] - target_pos[:2])  # XY distance
+        # print(f"distance from cube to target: {dist:.4f}m")
         
-        # XY distance
-        xy_dist = np.linalg.norm(cube_pos[:2] - target_pos[:2])
-        
-        # Z distance - target Z is table height + cube half-height
-        target_z = self.table_offset[2] + self.cube_size[2]
-        z_dist = abs(cube_pos[2] - target_z)
-        
-        # Success if close in XY and Z
-        return xy_dist < 0.05 and z_dist < 0.05
+        return dist < 0.07  
 
     def _load_model(self):
         """
@@ -270,7 +272,6 @@ class MoveTask(ManipulationEnv):
             mat_attrib=mat_attrib,
         )
         
-        
         # Define cube size for reference (used for target zone sizing)
         self.cube_size = [0.021, 0.021, 0.021]  # Average of min/max
         
@@ -285,7 +286,7 @@ class MoveTask(ManipulationEnv):
         # Create target zone (twice the width and length of the cube, very thin)
         # This is a visual marker showing where to place the cube
         target_size = [self.cube_size[0] * 2, self.cube_size[1] * 2, 0.002]  # Thin flat square
-
+        
         self.target_zone = BoxObject(
             name="target_zone",
             size_min=target_size,
@@ -411,8 +412,6 @@ class MoveTask(ManipulationEnv):
         Resets simulation internal configurations.
         """
         super()._reset_internal()
-        self._was_grasping = False
-        self._cube_was_lifted = False
 
         # Reset all object positions using initializer sampler if we're not directly loading from an xml
         if not self.deterministic_reset:
@@ -421,223 +420,14 @@ class MoveTask(ManipulationEnv):
             object_placements = self.placement_initializer.sample()
 
             # Loop through all objects and reset their positions
-            cube_pos = None
             for obj_pos, obj_quat, obj in object_placements.values():
                 if obj.joints is not None and len(obj.joints) > 0:
                     # Objects with joints: set joint position
                     self.sim.data.set_joint_qpos(obj.joints[0], np.concatenate([np.array(obj_pos), np.array(obj_quat)]))
-                    # Store cube position for gripper positioning
-                    if obj.name == "cube":
-                        cube_pos = np.array(obj_pos)
                 else:
                     # Static objects (no joints): set body position directly in the model
                     body_id = self.sim.model.body_name2id(obj.root_body)
                     self.sim.model.body_pos[body_id] = obj_pos
-            
-            # Always position gripper grasping the cube
-            if cube_pos is not None:
-                self._position_gripper_grasping_cube(cube_pos)
-
-    def _position_gripper_grasping_cube(self, cube_pos):
-        """
-        Position the gripper so it is already grasping the cube at reset.
-        Instead of complex IK, we move the gripper to a good grasping pose,
-        then teleport the cube into the gripper.
-        
-        Args:
-            cube_pos (np.array): 3D position of the cube [x, y, z]
-        """
-        import mujoco
-        
-        # Get the robot
-        robot = self.robots[0]
-        
-        try:
-            # Get the end effector site id
-            arm = robot.arms[0] if hasattr(robot, 'arms') and len(robot.arms) > 0 else "right"
-            gripper = robot.gripper[arm] if isinstance(robot.gripper, dict) else robot.gripper
-            eef_site_name = gripper.important_sites["grip_site"]
-            eef_site_id = self.sim.model.site_name2id(eef_site_name)
-            
-            # Get arm joint qpos indices from the robot
-            arm_joint_qpos_indices = robot._ref_arm_joint_pos_indexes
-            arm_joint_vel_indices = robot._ref_arm_joint_vel_indexes
-            
-            if len(arm_joint_qpos_indices) == 0:
-                print("Warning: No arm joint indices found, skipping IK positioning")
-                return
-            
-            # Target position: where we want the grip site to be
-            # This should be at the cube center
-            target_pos = cube_pos.copy()
-            
-            # Target orientation: gripper pointing straight down
-            # The grip site Z-axis should point down (negative world Z)
-            target_z_axis = np.array([0.0, 0.0, -1.0])  # Pointing down
-            
-            # IK parameters - tuned for reliable convergence
-            max_iters = 500
-            step_size = 0.2
-            pos_tolerance = 0.001  # 1mm position tolerance
-            ori_tolerance = 0.05   # Orientation tolerance (radians)
-            damping = 0.05
-            
-            # Weight for position vs orientation
-            pos_weight = 1.0
-            ori_weight = 0.3
-            
-            for iteration in range(max_iters):
-                # Forward to update state
-                self.sim.forward()
-                
-                # Get current end effector position and orientation
-                current_pos = self.sim.data.site_xpos[eef_site_id].copy()
-                current_rot = self.sim.data.site_xmat[eef_site_id].reshape(3, 3)
-                current_z_axis = current_rot[:, 2]  # Z-axis of gripper
-                
-                # Position error
-                pos_error = target_pos - current_pos
-                pos_error_norm = np.linalg.norm(pos_error)
-                
-                # Orientation error: we want gripper Z to align with target Z (pointing down)
-                # Use cross product to get rotation axis, dot product for angle
-                ori_error = np.cross(current_z_axis, target_z_axis)
-                ori_error_norm = np.linalg.norm(ori_error)
-                
-                # Check convergence
-                if pos_error_norm < pos_tolerance and ori_error_norm < ori_tolerance:
-                    break
-                
-                # Get Jacobian for position and rotation
-                jacp = np.zeros((3, self.sim.model.nv))
-                jacr = np.zeros((3, self.sim.model.nv))
-                mujoco.mj_jacSite(self.sim.model._model, self.sim.data._data, jacp, jacr, eef_site_id)
-                
-                # Extract Jacobian columns for arm joints only
-                Jp = jacp[:, arm_joint_vel_indices]  # Position Jacobian
-                Jr = jacr[:, arm_joint_vel_indices]  # Rotation Jacobian
-                
-                # Combine position and orientation into one task
-                # Stack the Jacobians and errors
-                J_combined = np.vstack([pos_weight * Jp, ori_weight * Jr])
-                error_combined = np.concatenate([pos_weight * pos_error, ori_weight * ori_error])
-                
-                # Damped least squares
-                JJT = J_combined @ J_combined.T
-                damped_JJT = JJT + (damping ** 2) * np.eye(6)
-                dq = J_combined.T @ np.linalg.solve(damped_JJT, step_size * error_combined)
-                
-                # Update arm joint positions
-                for i, qpos_idx in enumerate(arm_joint_qpos_indices):
-                    self.sim.data.qpos[qpos_idx] += dq[i]
-                
-                # Clip to joint limits
-                for qpos_idx in arm_joint_qpos_indices:
-                    # Get joint id from qpos address
-                    for jnt_id in range(self.sim.model.njnt):
-                        jnt_qpos_adr = self.sim.model.jnt_qposadr[jnt_id]
-                        if jnt_qpos_adr == qpos_idx:
-                            low, high = self.sim.model.jnt_range[jnt_id]
-                            if low < high:  # Only clip if limits are defined
-                                self.sim.data.qpos[qpos_idx] = np.clip(
-                                    self.sim.data.qpos[qpos_idx], low, high
-                                )
-                            break
-            
-            # Close the gripper fingers first
-            self._close_gripper_fingers(robot)
-            
-            # Forward pass to update state
-            self.sim.forward()
-            
-            # NOW teleport the cube INTO the gripper
-            # Get the current gripper position
-            gripper_pos = self.sim.data.site_xpos[eef_site_id].copy()
-            
-            # Set cube position to be at the gripper grip site
-            cube_joint_name = self.cube.joints[0] if self.cube.joints else None
-            if cube_joint_name:
-                # Get current cube quaternion (keep orientation)
-                cube_quat = self.sim.data.body_xquat[self.cube_body_id].copy()
-                # New cube position is at the gripper
-                new_cube_pos = gripper_pos.copy()
-                self.sim.data.set_joint_qpos(cube_joint_name, np.concatenate([new_cube_pos, cube_quat]))
-            
-            # Multiple forward passes to stabilize
-            for _ in range(10):
-                self.sim.forward()
-            
-            # Verify grasp
-            final_pos = self.sim.data.site_xpos[eef_site_id].copy()
-            final_cube_pos = self.sim.data.body_xpos[self.cube_body_id].copy()
-            grasp_error = np.linalg.norm(final_pos - final_cube_pos)
-            
-            if grasp_error > 0.02:
-                print(f"Warning: Cube not properly in gripper. Distance: {grasp_error:.4f}m")
-            
-        except Exception as e:
-            # If IK fails, just print a warning and continue with default position
-            print(f"Warning: Could not position gripper grasping cube via IK: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    def _close_gripper_fingers(self, robot):
-        """
-        Close the gripper fingers to grasp an object.
-        Sets the gripper joint positions to a closed/grasping state.
-        
-        Args:
-            robot: The robot object with the gripper to close
-        """
-        try:
-            # Get gripper joint indices - handle both dict and array formats
-            gripper_qpos_indices_raw = robot._ref_gripper_joint_pos_indexes
-            
-            # Convert to flat list of indices
-            if isinstance(gripper_qpos_indices_raw, dict):
-                # Multi-arm robot: flatten all arm gripper indices
-                gripper_qpos_indices = []
-                for arm_indices in gripper_qpos_indices_raw.values():
-                    if hasattr(arm_indices, '__iter__'):
-                        gripper_qpos_indices.extend(list(arm_indices))
-                    else:
-                        gripper_qpos_indices.append(arm_indices)
-            elif hasattr(gripper_qpos_indices_raw, '__iter__'):
-                gripper_qpos_indices = list(gripper_qpos_indices_raw)
-            else:
-                gripper_qpos_indices = [gripper_qpos_indices_raw]
-            
-            if len(gripper_qpos_indices) == 0:
-                return
-            
-            # For Panda gripper, the joints typically have range [0, 0.04]
-            # where 0 = fully closed and 0.04 = fully open
-            # Cube size is ~0.02m, so we need fingers slightly apart to grip it
-            cube_half_width = self.cube_size[0] / 2  # ~0.01m
-            grasp_position = cube_half_width + 0.002  # Slightly tighter than cube width
-            
-            for qpos_idx in gripper_qpos_indices:
-                qpos_idx = int(qpos_idx)  # Ensure integer index
-                # Get joint limits
-                for jnt_id in range(self.sim.model.njnt):
-                    jnt_qpos_adr = self.sim.model.jnt_qposadr[jnt_id]
-                    if jnt_qpos_adr == qpos_idx:
-                        low, high = self.sim.model.jnt_range[jnt_id]
-                        if low < high:
-                            self.sim.data.qpos[qpos_idx] = np.clip(grasp_position, low, high)
-                        else:
-                            self.sim.data.qpos[qpos_idx] = grasp_position
-                        break
-                else:
-                    self.sim.data.qpos[qpos_idx] = grasp_position
-            
-            # Forward pass to update gripper state
-            self.sim.forward()
-            
-        except Exception as e:
-            print(f"Warning: Could not close gripper fingers: {e}")
-            import traceback
-            traceback.print_exc()
 
     def visualize(self, vis_settings):
         """
@@ -665,10 +455,7 @@ class MoveTask(ManipulationEnv):
         return self._cube_on_target()
     
     def step(self, action):
-        action = np.array(action, dtype=np.float32)
-        
         obs, reward, done, info = super().step(action)
-        
         if self._check_success():
             done = True
             info["success"] = True
