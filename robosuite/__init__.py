@@ -1,9 +1,12 @@
 from robosuite.environments.base import make
 
 # Manipulation environments
+# Full task pick and place
 from robosuite.environments.manipulation.lift_target import LiftTarget
+
 from robosuite.environments.manipulation.reachtask import ReachTask
 from robosuite.environments.manipulation.grabtask import GrabTask
+# Random Open/Close starting Grab Task
 from robosuite.environments.manipulation.grabtaskv2 import GrabTaskv2
 from robosuite.environments.manipulation.movetask import MoveTask
 from robosuite.environments.manipulation.placetask import PlaceTask
