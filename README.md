@@ -12,7 +12,7 @@ modified for the Specialist VLA project.
   - Added environment Place: `robosuite/environments/manipulation/placetask.py`
 - Added New Cameras Assets for Tinyvla rbview and lbview: `robosuite/models/assets/arenas/table_arena.xml`
 
-For the main project see: https://github.com/Christian-Narcia/Specialist-TinyVLA
+For the main project see: https://github.com/Christian-Narcia/Specialist-VLA
 
 ---
 <!-- Original README below -->
